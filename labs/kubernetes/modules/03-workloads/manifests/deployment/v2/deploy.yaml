@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workload-demo
+  namespace: lab
+  annotations:
+    kubernetes.io/change-cause: "update to v2"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: workload-demo
+  template:
+    metadata:
+      labels:
+        app: workload-demo
+        version: v2
+    spec:
+      containers:
+      - name: app
+        image: nginx:1.27.5-alpine
+        env:
+        - name: APP_VERSION
+          value: v2
+        ports:
+        - containerPort: 80
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 3
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false

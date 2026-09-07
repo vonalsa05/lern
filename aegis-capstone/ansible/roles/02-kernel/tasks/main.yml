@@ -1,0 +1,108 @@
+---
+# Зачем: Kubelet (будущий K8s) и базы данных (например, Redis) требуют отключения swap для предсказуемой производительности памяти.
+# Почему так: Отключение в runtime работает сразу без ребута.
+- name: Отключение Swap (runtime)
+  command: swapoff -a
+  when: ansible_swaptotal_mb > 0
+
+# Зачем: Обеспечить, чтобы swap не включился обратно после перезагрузки сервера.
+# Почему так: Модуль `replace` закомментирует любую строку в fstab, заканчивающуюся на swap, что надежнее точного совпадения.
+- name: Отключение Swap в fstab (persistence)
+  replace:
+    path: /etc/fstab
+    regexp: '^([^#].*?\sswap\s+sw\s+.*)$'
+    replace: '# \1'
+
+# Зачем: Необходимы для будущей сетевой связности K8s (overlay, br_netfilter) и оптимизации TCP (bbr).
+# Почему так: Загружаем в runtime немедленно.
+- name: Загрузка модулей ядра
+  modprobe:
+    name: "{{ item }}"
+    state: present
+  loop: [overlay, br_netfilter, tcp_bbr]
+
+# Зачем: Гарантировать наличие нужных модулей ядра (BBR, overlay) после перезагрузки.
+# Почему так: Простая запись в `/etc/modules-load.d/` — стандартный путь systemd для автозагрузки.
+- name: Персистентная загрузка модулей
+  copy:
+    dest: /etc/modules-load.d/aegis.conf
+    content: |
+      overlay
+      br_netfilter
+      tcp_bbr
+
+# Зачем: MongoDB и Redis сильно деградируют (latency spikes), если ядро пытается сжимать память через THP.
+# Почему так: Настройки в `/sys/kernel/mm/...` нельзя задать через sysctl, поэтому требуется oneshot-скрипт при старте.
+- name: Создание Systemd Unit для отключения Transparent Huge Pages (THP)
+  copy:
+    dest: /etc/systemd/system/disable-thp.service
+    content: |
+      [Unit]
+      Description=Disable Transparent Huge Pages (THP)
+      DefaultDependencies=no
+      After=sysinit.target local-fs.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/bin/sh -c 'echo never > /sys/kernel/mm/transparent_hugepage/enabled; echo never > /sys/kernel/mm/transparent_hugepage/defrag'
+
+      [Install]
+      WantedBy=basic.target
+  when: "'stateful' in group_names"
+
+# Зачем: Активация только что созданного сервиса отключения THP.
+# Почему так: Запускается только на группе `stateful` (там, где есть базы данных).
+- name: Включение сервиса отключения THP
+  systemd:
+    name: disable-thp.service
+    enabled: yes
+    state: started
+  when: "'stateful' in group_names"
+
+# Зачем: Максимизация пропускной способности сети и устранение лимитов на количество одновременных подключений.
+# Почему так: Алгоритм TCP BBR значительно снижает latency в облачных сетях, а `somaxconn` и `ip_local_port_range` спасают от исчерпания портов.
+- name: Общий Тюнинг сети и BBR
+  sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/99-aegis-prod.conf
+    state: present
+    reload: yes
+  loop:
+    - { key: 'net.core.default_qdisc', value: 'fq' }
+    - { key: 'net.ipv4.tcp_congestion_control', value: 'bbr' }
+    - { key: 'net.core.somaxconn', value: '65535' }
+    - { key: 'net.ipv4.ip_local_port_range', value: '1024 65535' }
+    - { key: 'fs.file-max', value: '2000000' }
+    - { key: 'vm.swappiness', value: '0' }
+
+# Зачем: Заставить ядро плавно (без I/O spikes) сбрасывать данные БД на диск и предотвратить падение Mongo на NUMA-нодах.
+# Почему так: dirty_ratio=15 заставляет скидывать кэш раньше, а zone_reclaim_mode=0 предотвращает swap-штормы.
+- name: Тюнинг для PostgreSQL, Redis и MongoDB
+  sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/99-db-tuning.conf
+    state: present
+    reload: yes
+  loop:
+    - { key: 'vm.dirty_background_ratio', value: '5' }
+    - { key: 'vm.dirty_ratio', value: '15' }
+    - { key: 'vm.overcommit_memory', value: '1' }
+    - { key: 'vm.zone_reclaim_mode', value: '0' }
+  when: "'db_nodes' in group_names"
+
+# Зачем: Kafka использует Page Cache как свою основную память (она не держит данные в RAM сама).
+# Почему так: dirty_ratio=60 разрешает использовать до 60% ОЗУ под write-кеш Kafka перед принудительным I/O.
+- name: Тюнинг для Kafka (Page Cache Optimization)
+  sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/99-kafka-tuning.conf
+    state: present
+    reload: yes
+  loop:
+    - { key: 'vm.dirty_background_ratio', value: '5' }
+    - { key: 'vm.dirty_ratio', value: '60' }
+    - { key: 'vm.max_map_count', value: '262144' }
+  when: "'kafka_nodes' in group_names"

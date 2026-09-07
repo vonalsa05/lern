@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Понижаем мягкий лимит до 1024 (стандарт для многих дистрибутивов),
+# чтобы пример точно упал даже на тачках с уже поднятым ulimit.
+# Когда студент уже поднял лимит и хочет проверить, что fix помог —
+# запускает с KEEP_LIMIT=1 ./simulate.sh, и мы лимит не трогаем.
+if [[ "${KEEP_LIMIT:-0}" != "1" ]]; then
+    ulimit -Sn 1024
+fi
+
+echo "Запускаем процесс, пытающийся открыть 5000 файлов (ulimit -n = $(ulimit -n)) ..."
+
+python3 - <<'EOF'
+import os, tempfile, sys
+opened = []
+try:
+    for i in range(5000):
+        f = open(f"/tmp/open_many_{i}.tmp", "w")
+        opened.append(f)
+    print(f"Открыто {len(opened)} файлов — лимит не достигнут")
+except OSError as e:
+    print(f"Открыто {len(opened)} файлов, дальше упало: {e}")
+    sys.exit(1)
+finally:
+    for f in opened:
+        f.close()
+        try: os.unlink(f.name)
+        except OSError: pass
+EOF
+

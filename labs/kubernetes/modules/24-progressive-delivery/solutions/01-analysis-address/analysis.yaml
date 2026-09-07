@@ -1,0 +1,27 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: success-rate
+  namespace: lab
+spec:
+  args:
+    - name: app
+  metrics:
+    - name: pods-ready-fraction
+      # Анализ настоящий: Argo Rollouts ходит в Prometheus стенда (kps, м17)
+      # и считает долю Ready-подов rollout'а. Сломанная канарейка (под не
+      # становится Ready) опускает долю ниже порога -> релиз автоматически
+      # абортится и откатывается. В проде сюда же кладут error-rate/latency
+      # из метрик приложения — механика идентична.
+      initialDelay: 20s
+      interval: 15s
+      count: 4
+      failureLimit: 1
+      successCondition: len(result) > 0 && result[0] >= 0.9
+      provider:
+        prometheus:
+          address: http://kps-kube-prometheus-stack-prometheus.monitoring.svc:9090
+          query: >
+            sum(kube_pod_status_ready{namespace="lab", condition="true", pod=~"{{args.app}}-.*"})
+            /
+            count(kube_pod_status_ready{namespace="lab", condition="true", pod=~"{{args.app}}-.*"})

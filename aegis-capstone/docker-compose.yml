@@ -1,0 +1,247 @@
+# Phase 2 — локальный полный стек на az-app.
+# Сервисы коннектятся к локальным postgres/redis через docker DNS.
+# Phase 3 → POSTGRES_HOST переключится на overlay IP реальной az-db (10.100.0.11).
+
+services:
+  # --- Stateful local tier (Phase 2 — Phase 3 заменит на overlay-IP к az-db) ---
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    restart: unless-stopped
+    networks: [aegis-net]
+    command: ["postgres", "-c", "wal_level=replica", "-c", "max_wal_senders=10", "-c", "wal_keep_size=1GB", "-c", "hba_file=/etc/postgresql/pg_hba.conf"]
+    ports:
+      - "10.100.0.10:5432:5432"
+    environment:
+      - POSTGRES_USER=aegis
+      - POSTGRES_PASSWORD=aegis_dev_only
+      - POSTGRES_DB=aegis
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db-config/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aegis -d aegis"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    restart: unless-stopped
+    networks: [aegis-net]
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  mongo:
+    image: mongo:7.0
+    container_name: mongo
+    restart: unless-stopped
+    networks: [aegis-net]
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodata:/data/db
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: zookeeper
+    restart: unless-stopped
+    networks: [aegis-net]
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: kafka
+    restart: unless-stopped
+    networks: [aegis-net]
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_INTERNAL://kafka:29092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # --- Application services ---
+
+  ledger-api:
+    build: ./app/ledger-api
+    image: aegis/ledger-api:0.2.0
+    container_name: ledger-api
+    restart: unless-stopped
+    networks: [aegis-net]
+    depends_on:
+      postgres: { condition: service_healthy }
+    ports:
+      - "8081:80"
+    environment:
+      - SERVICE_NAME=ledger-api
+      - VERSION=0.2.0
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=aegis
+      - POSTGRES_PASSWORD=aegis_dev_only
+      - POSTGRES_DB=aegis
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1/health', timeout=3).status==200 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  normalizer:
+    build: ./app/normalizer
+    image: aegis/normalizer:0.2.0
+    container_name: normalizer
+    restart: unless-stopped
+    networks: [aegis-net]
+    depends_on:
+      kafka: { condition: service_healthy }
+      mongo: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    ports:
+      - "8082:80"
+    environment:
+      - SERVICE_NAME=normalizer
+      - VERSION=0.2.0
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - MONGO_URI=mongodb://mongo:27017
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1/health', timeout=3).status==200 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  matcher:
+    build: ./app/matcher
+    image: aegis/matcher:0.2.0
+    container_name: matcher
+    restart: unless-stopped
+    networks: [aegis-net]
+    depends_on:
+      redis: { condition: service_healthy }
+    ports:
+      - "8083:80"
+    environment:
+      - SERVICE_NAME=matcher
+      - VERSION=0.2.0
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1/health', timeout=3).status==200 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  producer:
+    build: ./app/producer
+    image: aegis/producer:0.1.0
+    container_name: producer
+    restart: unless-stopped
+    networks: [aegis-net]
+    ports:
+      - "8084:80"
+    environment:
+      - SERVICE_NAME=producer
+      - VERSION=0.1.0
+      - KAFKA_BOOTSTRAP_SERVERS=10.100.0.12:9092
+      - KAFKA_TOPIC=raw-feeds
+      - RATE_PER_SEC=10
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1/health', timeout=3).status==200 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  tx-writer:
+    build: ./app/tx-writer
+    image: aegis/tx-writer:0.1.0
+    container_name: tx-writer
+    restart: unless-stopped
+    networks: [aegis-net]
+    depends_on:
+      postgres: { condition: service_healthy }
+    ports:
+      - "8085:80"
+    environment:
+      - SERVICE_NAME=tx-writer
+      - VERSION=0.1.0
+      - KAFKA_BOOTSTRAP_SERVERS=10.100.0.12:9092
+      - KAFKA_TOPIC=raw-feeds
+      - KAFKA_GROUP_ID=tx-writer
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=aegis
+      - POSTGRES_PASSWORD=aegis_dev_only
+      - POSTGRES_DB=aegis
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1/health', timeout=3).status==200 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+networks:
+  aegis-net:
+    driver: bridge
+    name: aegis-net
+
+volumes:
+  pgdata: {}
+  redisdata: {}
+  mongodata: {}

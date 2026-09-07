@@ -1,0 +1,220 @@
+---
+# Зачем: Запускать демоны мониторинга не от root.
+# Почему так: Standard security practice (Principle of Least Privilege).
+- name: Создание пользователя для VictoriaMetrics и Prometheus
+  user:
+    name: prometheus
+    system: yes
+    shell: /bin/false
+
+# Зачем: Централизованный сбор метрик (TSDB).
+# Почему так: VictoriaMetrics совместима с Prometheus API, но потребляет в разы меньше RAM и CPU.
+- name: Скачивание VictoriaMetrics (Экономичная альтернатива Prometheus)
+  unarchive:
+    src: https://github.com/VictoriaMetrics/VictoriaMetrics/releases/download/v1.97.1/victoria-metrics-linux-amd64-v1.97.1.tar.gz
+    dest: /usr/local/bin/
+    remote_src: yes
+  when: "'monitor_nodes' in group_names"
+
+# Зачем: Обеспечить автозапуск и фоновую работу TSDB.
+# Почему так: Данные хранятся на /var/lib/..., retentionPeriod установлен в 1 месяц для экономии места. Добавлен параметр promscrape.config для сбора метрик с узлов.
+- name: Директория для конфигурации VictoriaMetrics
+  file:
+    path: /etc/victoriametrics
+    state: directory
+  when: "'monitor_nodes' in group_names"
+
+- name: Конфигурация скрейпинга (Prometheus format)
+  template:
+    src: prometheus.yml.j2
+    dest: /etc/victoriametrics/prometheus.yml
+  when: "'monitor_nodes' in group_names"
+  notify: restart victoriametrics
+
+- name: Директория для данных VictoriaMetrics
+  file:
+    path: /var/lib/victoria-metrics-data
+    state: directory
+    owner: prometheus
+    group: prometheus
+  when: "'monitor_nodes' in group_names"
+
+- name: Настройка Systemd сервиса для VictoriaMetrics
+  copy:
+    dest: /etc/systemd/system/victoriametrics.service
+    content: |
+      [Unit]
+      Description=VictoriaMetrics
+      After=network.target
+
+      [Service]
+      User=prometheus
+      ExecStart=/usr/local/bin/victoria-metrics-prod \
+          -storageDataPath=/var/lib/victoria-metrics-data \
+          -retentionPeriod=1 \
+          -promscrape.config=/etc/victoriametrics/prometheus.yml
+      ExecReload=/bin/kill -HUP $MAINPID
+      Restart=on-failure
+
+      [Install]
+      WantedBy=multi-user.target
+  when: "'monitor_nodes' in group_names"
+
+- name: Запуск и включение VictoriaMetrics
+  systemd:
+    name: victoriametrics
+    state: started
+    enabled: yes
+    daemon_reload: yes
+  when: "'monitor_nodes' in group_names"
+
+# Зачем: Grafana требует HTTPS-репозиторий.
+# Почему так: Стандартные утилиты Debian/Ubuntu для работы с внешними репо.
+- name: Зависимости apt для Grafana repo
+  apt:
+    name: [apt-transport-https, gnupg, software-properties-common]
+    state: present
+  when: "'monitor_nodes' in group_names"
+
+# Зачем: Подтвердить подлинность пакетов Grafana.
+# Почему так: Security best practice.
+- name: GPG ключ Grafana
+  get_url:
+    url: https://apt.grafana.com/gpg.key
+    dest: /etc/apt/trusted.gpg.d/grafana.asc
+    mode: '0644'
+  when: "'monitor_nodes' in group_names"
+
+# Зачем: Добавить источник для установки Grafana.
+# Почему так: OSS версия (stable) достаточна для наших нужд.
+- name: Apt репозиторий Grafana (stable)
+  apt_repository:
+    repo: "deb [signed-by=/etc/apt/trusted.gpg.d/grafana.asc] https://apt.grafana.com stable main"
+    state: present
+    filename: grafana
+  when: "'monitor_nodes' in group_names"
+
+# Зачем: Инструмент для визуализации метрик (дашборды).
+# Почему так: Устанавливается через apt для легкого обновления в будущем.
+- name: Установка Grafana
+  apt:
+    name: grafana
+    state: present
+    update_cache: yes
+  when: "'monitor_nodes' in group_names"
+
+# Зачем: Поднять web-интерфейс Grafana.
+# Почему так: enabled=yes гарантирует старт после ребута.
+- name: Запуск Grafana
+  systemd:
+    name: grafana-server
+    state: started
+    enabled: yes
+  when: "'monitor_nodes' in group_names"
+
+# Зачем: Автоматическое добавление VictoriaMetrics как источника данных в Grafana.
+# Почему так: Provisioning избавляет от ручной настройки в UI.
+- name: Настройка Datasource для Grafana
+  copy:
+    dest: /etc/grafana/provisioning/datasources/victoriametrics.yml
+    content: |
+      apiVersion: 1
+      datasources:
+        - name: VictoriaMetrics
+          type: prometheus
+          access: proxy
+          url: http://localhost:8428
+          isDefault: true
+  when: "'monitor_nodes' in group_names"
+  notify: restart grafana
+
+# Зачем: Указать Grafana, откуда читать готовые дашборды.
+# Почему так: Файловый провайдер — стандартный подход для IaC.
+- name: Настройка провайдера дашбордов для Grafana
+  copy:
+    dest: /etc/grafana/provisioning/dashboards/default.yml
+    content: |
+      apiVersion: 1
+      providers:
+        - name: 'Default'
+          orgId: 1
+          folder: ''
+          type: file
+          disableDeletion: false
+          options:
+            path: /var/lib/grafana/dashboards
+  when: "'monitor_nodes' in group_names"
+  notify: restart grafana
+
+# Зачем: Место для хранения скачанных дашбордов.
+# Почему так: У Grafana должен быть доступ на чтение к этой папке.
+- name: Создание директории для дашбордов
+  file:
+    path: /var/lib/grafana/dashboards
+    state: directory
+    owner: grafana
+    group: grafana
+  when: "'monitor_nodes' in group_names"
+
+# Зачем: Загрузить готовые индустриальные дашборды для базового мониторинга инфраструктуры и БД.
+# Почему так: Используем публичное API grafana.com. Обратите внимание, что для БД потребуются экспортеры.
+- name: Скачивание дашбордов для базового мониторинга
+  get_url:
+    url: "https://grafana.com/api/dashboards/{{ item.id }}/revisions/{{ item.rev }}/download"
+    dest: "/var/lib/grafana/dashboards/{{ item.name }}.json"
+    owner: grafana
+    group: grafana
+  loop:
+    - { id: '1860', rev: '37', name: 'node-exporter-full' }
+    - { id: '11176', rev: '3', name: 'victoriametrics' }
+    - { id: '9628', rev: '7', name: 'postgresql' }
+    - { id: '763', rev: '14', name: 'redis' }
+    - { id: '16490', rev: '1', name: 'mongodb' }
+    - { id: '11962', rev: '2', name: 'kafka' }
+  when: "'monitor_nodes' in group_names"
+  ignore_errors: yes
+  notify: restart grafana
+
+# Зачем: Экспортировать метрики CPU/RAM/Disk со всех машин кластера.
+# Почему так: Устанавливается через бинарник, так как версия в apt часто устаревшая.
+- name: Установка Node Exporter на все машины
+  unarchive:
+    src: https://github.com/prometheus/node_exporter/releases/download/v1.7.0/node_exporter-1.7.0.linux-amd64.tar.gz
+    dest: /tmp/
+    remote_src: yes
+
+# Зачем: Положить бинарник в системный PATH.
+# Почему так: /usr/local/bin стандартное место для ручных инсталляций.
+- name: Перемещение бинарника Node Exporter
+  copy:
+    src: /tmp/node_exporter-1.7.0.linux-amd64/node_exporter
+    dest: /usr/local/bin/
+    remote_src: yes
+    mode: '0755'
+
+# Зачем: Управление демоном через systemd.
+# Почему так: Запускаем от непривилегированного пользователя prometheus.
+- name: Настройка Systemd сервиса для Node Exporter
+  copy:
+    dest: /etc/systemd/system/node_exporter.service
+    content: |
+      [Unit]
+      Description=Node Exporter
+      After=network.target
+
+      [Service]
+      User=prometheus
+      ExecStart=/usr/local/bin/node_exporter
+      Restart=on-failure
+
+      [Install]
+      WantedBy=multi-user.target
+
+# Зачем: Активировать сбор метрик.
+# Почему так: daemon_reload=yes подхватывает только что созданный unit-файл.
+- name: Запуск Node Exporter
+  systemd:
+    name: node_exporter
+    state: started
+    enabled: yes
+    daemon_reload: yes

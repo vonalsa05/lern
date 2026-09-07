@@ -1,0 +1,8 @@
+"aegis_cloud": "azure"
+"aegis_data_devices":
+- "fs": "xfs"
+  "lun": 10
+  "mount": "/var/lib/victoria-metrics-data"
+  "name": "monitor"
+"aegis_raid_luns": []
+"aegis_region": "southeastasia"

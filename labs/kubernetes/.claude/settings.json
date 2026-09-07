@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git add:*)",
+      "Bash(git commit -m ':*)",
+      "Bash(git commit:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git fetch:*)",
+      "Bash(kubectl:*)",
+      "Bash(helm:*)",
+      "Bash(ansible-playbook:*)",
+      "Bash(terraform:*)",
+      "Bash(gcloud compute instances list:*)",
+      "Bash(gcloud compute instances describe:*)",
+      "Bash(gcloud compute instances start:*)",
+      "Bash(gcloud compute instances stop:*)",
+      "Bash(gcloud auth print-access-token:*)",
+      "Bash(ssh -i /root/.ssh/kubespray:*)",
+      "Bash(bash scripts/:*)",
+      "Bash(bash /root/lern/labs/kubernetes/scripts/:*)",
+      "Bash(shellcheck:*)",
+      "Bash(yamllint:*)",
+      "Bash(kubeconform:*)",
+      "Bash(kustomize:*)",
+      "Bash(gh run list:*)",
+      "Bash(gh run view:*)"
+    ],
+    "ask": [
+      "Bash(terraform destroy:*)",
+      "Bash(gcloud compute instances delete:*)"
+    ]
+  }
+}

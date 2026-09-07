@@ -1,0 +1,134 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8080:8080"
+
+    environment:
+      DATABASE_URL: postgres://appuser:apppass@db:5432/appdb
+      REDIS_URL: redis://cache:6379
+
+    depends_on:
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_started
+
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  db:
+    image: postgres:16-alpine
+
+    environment:
+      POSTGRES_DB: appdb
+      POSTGRES_USER: appuser
+      POSTGRES_PASSWORD: apppass
+
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U appuser -d appdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  cache:
+    image: redis:7-alpine
+
+    volumes:
+      - redis_data:/data
+
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+
+    ports:
+      - "9090:9090"
+
+    volumes:
+      - ./prometheus:/etc/prometheus:ro
+
+    depends_on:
+      cadvisor:
+        condition: service_healthy
+
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+
+    ports:
+      - "8081:8080"
+
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      #- /var/lib/docker:/var/lib/docker:ro
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  pg_data:
+  redis_data:

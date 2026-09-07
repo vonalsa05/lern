@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: affinity-demo
+  namespace: lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: affinity-demo
+  template:
+    metadata:
+      labels:
+        app: affinity-demo
+    spec:
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+              - key: topology.kubernetes.io/zone
+                operator: In
+                values:
+                - lab-a
+      containers:
+      - name: app
+        image: nginx:1.27-alpine
+        ports:
+        - containerPort: 80
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 3
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false

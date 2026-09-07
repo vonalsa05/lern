@@ -1,0 +1,18 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-worker
+  namespace: lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payment-worker
+  template:
+    metadata:
+      labels:
+        app: payment-worker
+    spec:
+      containers:
+      - name: app
+        image: nginx:no-such-tag

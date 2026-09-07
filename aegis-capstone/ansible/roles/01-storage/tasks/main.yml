@@ -1,0 +1,215 @@
+---
+# Зачем: Облачные образы не включают нужные ФС-утилиты по умолчанию.
+# Почему так: LVM нужен для гибкой разметки, XFS - лучшая ФС для Mongo/Kafka (требование/рекомендация вендора).
+- name: Рескан SCSI шины для обнаружения новых дисков Azure
+  shell: |
+    for host in /sys/class/scsi_host/*; do echo "- - -" > $host/scan; done
+  args:
+    executable: /bin/bash
+  changed_when: false
+
+- name: Резолв LUN в имена устройств (Azure)
+  shell: |
+    set -e
+    for f in /dev/disk/by-path/*-scsi-0:0:0:{{ item.lun }} /dev/disk/by-path/*-lun-{{ item.lun }}; do
+      [ -e "$f" ] && readlink -f "$f" && exit 0
+    done
+    exit 1
+  register: resolved_data_devs
+  loop: "{{ aegis_data_devices | default([]) }}"
+  loop_control:
+    label: "Resolving {{ item.name }} (LUN: {{ item.lun | default('N/A') }})"
+  when: item.lun is defined
+  until: resolved_data_devs.stdout | length > 0
+  retries: 5
+  delay: 5
+  changed_when: false
+
+- name: Резолв LUN для RAID (Azure)
+  shell: |
+    set -e
+    for f in /dev/disk/by-path/*-scsi-0:0:0:{{ item }} /dev/disk/by-path/*-lun-{{ item }}; do
+      [ -e "$f" ] && readlink -f "$f" && exit 0
+    done
+    exit 1
+  register: resolved_raid_devs
+  loop: "{{ aegis_raid_luns | default([]) }}"
+  when: aegis_raid_luns | default([]) | length > 0
+  until: resolved_raid_devs.stdout | length > 0
+  retries: 5
+  delay: 5
+  changed_when: false
+
+- name: Подготовка списков устройств
+  set_fact:
+    aegis_data_devices_final: "{{ _data_raw | from_json }}"
+    aegis_raid_devices_final: "{{ resolved_raid_devs.results | default([]) | map(attribute='stdout') | list }}"
+  vars:
+    _data_raw: >-
+      {%- set results = [] -%}
+      {%- for item in resolved_data_devs.results | default([]) -%}
+        {%- if not item.skipped | default(false) -%}
+          {%- set _ = results.append(item.item | combine({'dev': item.stdout})) -%}
+        {%- else -%}
+          {%- set _ = results.append(item.item) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ results | to_json }}
+
+- name: Assertion для устройства
+  assert:
+    that:
+      - aegis_data_devices_final | selectattr('dev', 'truthy') | list | length == aegis_data_devices | default([]) | length
+    fail_msg: "Не все устройства зарезолвились ({{ aegis_data_devices_final | selectattr('dev', 'truthy') | list | length }} resolved vs {{ aegis_data_devices | default([]) | length }} expected)"
+
+- name: Assertions for RAID
+  assert:
+    that:
+      - (aegis_raid_devices_final | default([])) | length == (aegis_raid_luns | default([])) | length
+    fail_msg: "Количество разрешенных устройств RAID не соответствует включению в конфигурацию ({{ aegis_raid_devices_final | default([]) | length }} vs {{ aegis_raid_luns | default([]) | length }})"
+
+# Зачем: Зависимость для создания software RAID (используется для бэкап-узла).
+# Почему так: Устанавливается условно (только если есть список `aegis_raid_devices`), чтобы не засорять остальные узлы.
+
+- name: Проверка существования RAID массива /dev/md0
+  stat:
+    path: /dev/md0
+  register: md0_stat
+
+- name: Установка mdadm для RAID
+  apt:
+    name: mdadm
+    state: present
+  when: aegis_raid_devices_final | length > 0
+
+- name: Остановка частичных/битых RAID массивов перед сборкой
+  shell: |
+    mdadm --stop /dev/md* || true
+    mdadm --remove /dev/md* || true
+  when:
+    - aegis_raid_devices_final | length >= 3
+    - not md0_stat.stat.exists
+  changed_when: false
+
+- name: Очистка дисков перед созданием RAID (Azure)
+  shell: "mdadm --zero-superblock {{ item }} || true"
+  loop: "{{ aegis_raid_devices_final }}"
+  when:
+    - aegis_raid_devices_final | length >= 3
+    - not md0_stat.stat.exists
+  changed_when: false
+
+# Зачем: Обеспечить отказоустойчивое хранилище (RAID 5) для архивов и бэкапов.
+# Почему так: `creates: /dev/md0` обеспечивает идемпотентность (не пересоздает массив, если он уже есть).
+- name: Создание RAID 5 массива
+  command: >-
+    mdadm --create --verbose /dev/md0
+      --level=5
+      --raid-devices={{ aegis_raid_devices_final | length }}
+      {{ aegis_raid_devices_final | join(' ') }}
+      --run
+  args:
+    creates: /dev/md0
+  when: aegis_raid_devices_final | length >= 3
+  notify: update initramfs
+
+# Зачем: Ядро при загрузке должно знать, из каких дисков собирать RAID, чтобы примонтировать его.
+# Почему так: UUID фиксирует массив, иначе изменение порядка дисков при ребуте развалит RAID.
+- name: Получение конфигурации RAID
+  command: mdadm --detail --scan
+  register: mdadm_scan_output
+  changed_when: false
+  when: aegis_raid_devices_final | length >= 3
+
+- name: Сохранение конфигурации RAID в /etc/mdadm/mdadm.conf
+  lineinfile:
+    path: /etc/mdadm/mdadm.conf
+    line: "{{ item }}"
+    state: present
+  loop: "{{ mdadm_scan_output.stdout_lines | default([]) }}"
+  when: 
+    - aegis_raid_devices_final | length >= 3
+    - mdadm_scan_output.stdout_lines | default([]) | length > 0
+
+# Зачем: Изолировать I/O для каждой базы данных (PostgreSQL, Mongo, Redis).
+# Почему так: Использование разделов вместо "сырых" дисков - best practice (защита от случайной перезаписи).
+- name: Создание разделов для LVM
+  community.general.parted:
+    device: "{{ item.dev }}"
+    number: 1
+    state: present
+    label: gpt
+    flags: [ lvm ]
+  loop: "{{ aegis_data_devices_final | selectattr('dev', 'defined') | list }}"
+  loop_control:
+    label: "Partitioning {{ item.dev }}"
+
+- name: Обновление списка устройств с учетом разделов
+  set_fact:
+    aegis_data_devices_partitioned: "{{ _part_raw | from_json }}"
+  vars:
+    _part_raw: >-
+      {%- set results = [] -%}
+      {%- for item in aegis_data_devices_final -%}
+        {%- if item.dev is defined -%}
+          {%- set suffix = 'p1' if item.dev[-1] is match('[0-9]') else '1' -%}
+          {%- set _ = results.append(item | combine({'pdev': item.dev + suffix})) -%}
+        {%- else -%}
+          {%- set _ = results.append(item) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ results | to_json }}
+
+# Зачем: LVM дает возможность онлайн-расширения (`vgextend`, `lvextend`) и создания снапшотов.
+- name: Создание Volume Group на каждом выделенном диске
+  community.general.lvg:
+    vg: "vg_{{ item.name }}"
+    pvs: "{{ item.pdev }}"
+  loop: "{{ aegis_data_devices_partitioned | selectattr('pdev', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.name }} → {{ item.pdev }}"
+
+# Зачем: Утилизировать 100% выделенного диска под конкретную базу данных.
+# Почему так: Удалено `ignore_errors: yes`, так как правильное использование модуля и проверка состояния делают это излишним.
+- name: Создание Logical Volume (100%VG)
+  community.general.lvol:
+    vg: "vg_{{ item.name }}"
+    lv: "lv_{{ item.name }}"
+    size: 100%VG
+    resizefs: yes
+  loop: "{{ aegis_data_devices_partitioned | selectattr('pdev', 'defined') | list }}"
+  loop_control:
+    label: "lv_{{ item.name }}"
+
+# Зачем: Подготовить логические тома к записи данных.
+# Почему так: Тип ФС (ext4/xfs) задается динамически через host_vars в зависимости от профиля I/O базы.
+- name: Форматирование тома в целевой ФС
+  filesystem:
+    fstype: "{{ item.fs }}"
+    dev: "/dev/vg_{{ item.name }}/lv_{{ item.name }}"
+  loop: "{{ aegis_data_devices_partitioned | selectattr('pdev', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.fs }} on lv_{{ item.name }}"
+
+# Зачем: Точка монтирования должна существовать до вызова `mount`, иначе он упадет.
+# Почему так: Вынесено в отдельный task для надежности.
+- name: Создание точки монтирования
+  file:
+    path: "{{ item.mount }}"
+    state: directory
+  loop: "{{ aegis_data_devices_partitioned | selectattr('pdev', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.mount }}"
+
+# Зачем: Подключить диски к файловой системе ОС.
+# Почему так: `state: mounted` не только монтирует сейчас, но и прописывает в `/etc/fstab` для авто-монтирования при загрузке.
+- name: Монтирование (с записью в fstab)
+  mount:
+    path: "{{ item.mount }}"
+    src: "/dev/vg_{{ item.name }}/lv_{{ item.name }}"
+    fstype: "{{ item.fs }}"
+    state: mounted
+  loop: "{{ aegis_data_devices_partitioned | selectattr('pdev', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.mount }}"
+

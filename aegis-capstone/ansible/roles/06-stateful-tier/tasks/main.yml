@@ -1,0 +1,210 @@
+---
+# --- APP NODE (Nginx / LB & DB Client) ---
+# Зачем: Ingress-слой для приема внешнего трафика (Nginx) и точка доступа для проверки/администрирования БД (psql).
+# Почему так: Группируем задачи установки прокси и клиента БД через block для чистоты кода и единого условия when.
+- name: Setup App Node Tier
+  block:
+    - name: Установка Nginx
+      apt:
+        name: nginx
+        state: present
+        update_cache: yes
+
+    - name: Установка клиента PostgreSQL (psql)
+      apt:
+        name: postgresql-client
+        state: present
+        update_cache: yes
+
+    - name: Запуск Nginx
+      systemd:
+        name: nginx
+        state: started
+        enabled: yes
+  when: "'app_nodes' in group_names"
+
+# --- DB NODE (PostgreSQL, Redis, MongoDB) ---
+# Зачем: Развернуть State-слой (реляционная БД, NoSQL аудит, кэш).
+# Почему так: Ставится только на `db_nodes` для аппаратной изоляции от приложения.
+- name: Setup Database Tier
+  block:
+    - name: Добавление GPG ключа PGDG
+      get_url:
+        url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+        dest: /etc/apt/trusted.gpg.d/pgdg.asc
+
+    - name: Добавление репозитория PGDG
+      apt_repository:
+        repo: "deb [signed-by=/etc/apt/trusted.gpg.d/pgdg.asc] http://apt.postgresql.org/pub/repos/apt jammy-pgdg main"
+        state: present
+        filename: pgdg
+
+    - name: Установка PostgreSQL, Redis и psycopg2
+      apt:
+        name: [postgresql-16, redis-server, python3-psycopg2]
+        state: present
+        update_cache: yes
+
+    - name: Добавление GPG ключа MongoDB
+      get_url:
+        url: https://www.mongodb.org/static/pgp/server-7.0.asc
+        dest: /etc/apt/trusted.gpg.d/mongodb-server-7.0.asc
+
+    - name: Добавление репозитория MongoDB 7.0
+      apt_repository:
+        repo: "deb [ arch=amd64,arm64 signed-by=/etc/apt/trusted.gpg.d/mongodb-server-7.0.asc ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse"
+        state: present
+        filename: mongodb-org-7.0
+
+    - name: Установка MongoDB
+      apt:
+        name: mongodb-org
+        state: present
+        update_cache: yes
+
+    - name: Права на директорию MongoDB
+      file:
+        path: /var/lib/mongodb
+        state: directory
+        owner: mongodb
+        group: mongodb
+
+    - name: Настройка postgre config
+      lineinfile:
+        path: /etc/postgresql/{{ pg_version }}/main/postgresql.conf
+        regexp: '^#?listen_addresses'
+        line: "listen_addresses = 'localhost,{{ wg_overlay_ip }}'"
+      notify: restart postgresql
+
+    - name: Настройка pg_hba config
+      lineinfile:
+        path: /etc/postgresql/{{ pg_version }}/main/pg_hba.conf
+        insertafter: '^# IPv4 local connections'
+        line: 'host   aegis   aegis   10.100.0.0/24   scram-sha-256'
+      notify: restart postgresql
+
+    - name: Запуск баз данных
+      systemd: name="{{ item }}" state=started enabled=yes
+      loop: [postgresql, redis-server, mongod]
+
+    - name: Создание роли aegis в postgre
+      become: yes
+      become_user: postgres
+      no_log: yes
+      community.postgresql.postgresql_user:
+        name: aegis
+        password: "{{ aegis_pg_password }}"
+        role_attr_flags: NOSUPERUSER
+
+    - name: Создание БД aegis в postgre
+      become: yes
+      become_user: postgres
+      community.postgresql.postgresql_db:
+        name: aegis
+        owner: aegis
+        encoding: UTF-8
+        lc_collate: en_US.UTF-8
+        lc_ctype: en_US.UTF-8
+        template: template0
+
+  when: "'db_nodes' in group_names"
+
+# --- KAFKA NODE ---
+# Зачем: Развернуть брокер сообщений для event-driven архитектуры (связь между ingest, normalizer, ledger).
+# Почему так: Вынесен на `kafka_nodes` с отдельным хранилищем (высокие требования к I/O). Запускается в современном KRaft mode (без внешнего Zookeeper).
+- name: Setup Kafka Tier
+  block:
+    - name: Установка Java
+      apt: name=default-jre state=present update_cache=yes
+
+    - name: Скачивание и распаковка Apache Kafka
+      unarchive:
+        src: https://archive.apache.org/dist/kafka/3.7.0/kafka_2.13-3.7.0.tgz
+        dest: /opt/
+        remote_src: yes
+
+    - name: Создание симлинка для Kafka
+      file:
+        src: /opt/kafka_2.13-3.7.0
+        dest: /opt/kafka
+        state: link
+
+    - name: Изменение директории логов в server.properties (KRaft)
+      lineinfile:
+        path: /opt/kafka/config/kraft/server.properties
+        regexp: '^log.dirs='
+        line: 'log.dirs=/var/lib/kafka/data0'
+
+    - name: Настройка слушателей (Listeners) в server.properties
+      lineinfile:
+        path: /opt/kafka/config/kraft/server.properties
+        regexp: '^listeners='
+        line: 'listeners=PLAINTEXT://0.0.0.0:9092,CONTROLLER://:9093'
+
+    - name: Настройка Advertised Listeners в server.properties
+      lineinfile:
+        path: /opt/kafka/config/kraft/server.properties
+        regexp: '^advertised.listeners='
+        line: 'advertised.listeners=PLAINTEXT://{{ hostvars[inventory_hostname].wg_overlay_ip }}:9092'
+
+    - name: Форматирование хранилища KRaft (только один раз)
+      shell: |
+        UUID=$(/opt/kafka/bin/kafka-storage.sh random-uuid)
+        /opt/kafka/bin/kafka-storage.sh format -t $UUID -c /opt/kafka/config/kraft/server.properties
+        touch /var/lib/kafka/.kraft_formatted
+      args:
+        creates: /var/lib/kafka/.kraft_formatted
+
+    - name: Настройка Systemd сервиса для Kafka
+      copy:
+        dest: /etc/systemd/system/kafka.service
+        content: |
+          [Unit]
+          Description=Apache Kafka Server (KRaft mode)
+          Documentation=http://kafka.apache.org/documentation.html
+          Requires=network.target
+          After=network.target
+
+          [Service]
+          Type=simple
+          Environment="JAVA_HOME=/usr/lib/jvm/default-java"
+          ExecStart=/opt/kafka/bin/kafka-server-start.sh /opt/kafka/config/kraft/server.properties
+          ExecStop=/opt/kafka/bin/kafka-server-stop.sh
+          Restart=on-abnormal
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Запуск Kafka
+      systemd: name=kafka state=started enabled=yes daemon_reload=yes
+  when: "'kafka_nodes' in group_names"
+
+# --- ETCD NODE ---
+# Зачем: Надежное распределенное хранилище для Leader Election (чтобы worker-ы не обрабатывали одни и те же данные дважды).
+# Почему так: Разворачивается на выделенном `etcd_nodes` для изоляции от I/O-нагрузок баз данных.
+- name: Setup etcd Tier
+  block:
+    - name: Установка etcd-server
+      apt: name=etcd-server state=present update_cache=yes
+
+    - name: Настройка etcd
+      copy:
+        dest: /etc/default/etcd
+        content: |
+          ETCD_NAME="{{ inventory_hostname }}"
+          ETCD_DATA_DIR="/var/lib/etcd/default.etcd"
+          ETCD_LISTEN_PEER_URLS="http://0.0.0.0:2380"
+          ETCD_LISTEN_CLIENT_URLS="http://0.0.0.0:2379"
+          ETCD_ADVERTISE_CLIENT_URLS="http://localhost:2379"
+
+    - name: Права на директорию etcd
+      file:
+        path: /var/lib/etcd
+        state: directory
+        owner: etcd
+        group: etcd
+        recurse: yes
+
+    - name: Запуск etcd
+      systemd: name=etcd state=started enabled=yes
+  when: "'etcd_nodes' in group_names"

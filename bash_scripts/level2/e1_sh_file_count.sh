@@ -1,0 +1,5 @@
+#!
+
+file_count=
+
+echo

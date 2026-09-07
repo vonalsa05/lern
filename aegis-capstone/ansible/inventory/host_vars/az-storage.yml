@@ -1,0 +1,11 @@
+"aegis_cloud": "azure"
+"aegis_data_devices":
+- "dev": "/dev/md0"
+  "fs": "xfs"
+  "mount": "/mnt/backups"
+  "name": "backups"
+"aegis_raid_luns":
+- 10
+- 11
+- 12
+"aegis_region": "australiaeast"

@@ -1,0 +1,8 @@
+"aegis_cloud": "azure"
+"aegis_data_devices":
+- "fs": "ext4"
+  "lun": 10
+  "mount": "/var/lib/etcd"
+  "name": "etcd"
+"aegis_raid_luns": []
+"aegis_region": "australiasoutheast"
