@@ -102,6 +102,11 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.2"
+          memory: 128M
 
   redis-exporter:
     image: oliver006/redis_exporter:v1.91.1
@@ -110,6 +115,11 @@ services:
     depends_on:
       cache:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.2"
+          memory: 128M    
 
   prometheus:
     image: prom/prometheus:v2.53.0
