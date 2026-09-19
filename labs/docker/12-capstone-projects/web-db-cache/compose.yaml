@@ -1,6 +1,7 @@
 services:
   api:
     build: .
+    image: web-db-cache:1.0.0
     ports:
       - "8080:8080"
 
@@ -95,7 +96,7 @@ services:
         max-file: "3"
 
   postgres-exporter:
-    image: prometheuscommunity/postgres-exporter
+    image: prometheuscommunity/postgres-exporter:v0.20.1
     environment:
       DATA_SOURCE_NAME: "postgresql://appuser:apppass@db:5432/appdb?sslmode=disable"
     depends_on:
@@ -103,7 +104,7 @@ services:
         condition: service_healthy
 
   redis-exporter:
-    image: oliver006/redis_exporter
+    image: oliver006/redis_exporter:v1.91.1
     environment:
       REDIS_ADDR: "redis://cache:6379"
     depends_on:
