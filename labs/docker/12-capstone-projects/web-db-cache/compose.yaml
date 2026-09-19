@@ -107,6 +107,11 @@ services:
         limits:
           cpus: "0.2"
           memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   redis-exporter:
     image: oliver006/redis_exporter:v1.91.1
@@ -119,7 +124,12 @@ services:
       resources:
         limits:
           cpus: "0.2"
-          memory: 128M    
+          memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   prometheus:
     image: prom/prometheus:v2.53.0
