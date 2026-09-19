@@ -9,8 +9,8 @@ services:
       REDIS_URL: redis://cache:6379
 
     depends_on:
-      db:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       cache:
         condition: service_healthy
 
@@ -54,6 +54,21 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+        
+  migrate:
+    image: postgres:16-alpine
+    environment:
+      PGPASSWORD: apppass
+    volumes:
+      - ./migrations:/migrations:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - psql -h db -U appuser -d appdb -f /migrations/001_init.sql
+    restart: "no"
 
   cache:
     image: redis:7-alpine
