@@ -2,7 +2,7 @@ import os
 
 import psycopg
 import redis
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, HTTPException, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 app = FastAPI()
@@ -32,7 +32,10 @@ def readyz():
         with psycopg.connect(DATABASE_URL):
             return {"status": "ready"}
     except Exception:
-        return {"status": "not ready"}
+        raise HTTPException(
+            status_code=503,
+            detail={"status": "not ready"},
+        )
 
 
 @app.get("/hello")
