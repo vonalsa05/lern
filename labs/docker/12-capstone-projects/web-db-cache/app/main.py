@@ -1,24 +1,65 @@
 import os
+import time
 
 import psycopg
 import redis
 from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel
-from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from prometheus_client import Counter, Histogram, make_asgi_app
 
 app = FastAPI()
 
+REQUEST_COUNT = Counter(
+    "http_requests_total",
+    "Total HTTP requests",
+    ["method", "route", "status"],
+)
+
+REQUEST_LATENCY = Histogram(
+    "http_request_duration_seconds",
+    "HTTP request latency",
+    ["method", "route"],
+)
+
+CACHE_HITS = Counter(
+    "cache_hits_total",
+    "Total cache hits",
+)
+
+CACHE_MISSES = Counter(
+    "cache_misses_total",
+    "Total cache misses",
+)
+
+@app.middleware("http")
+async def metrics_middleware(request, call_next):
+    start = time.perf_counter()
+
+    response = await call_next(request)
+
+    duration = time.perf_counter() - start
+
+    route = request.scope.get("route")
+    route = getattr(route, "path", request.url.path)
+
+    REQUEST_COUNT.labels(
+        method=request.method,
+        route=route,
+        status=response.status_code,
+    ).inc()
+
+    REQUEST_LATENCY.labels(
+        method=request.method,
+        route=route,
+    ).observe(duration)
+
+    return response
+    
+app.mount("/metrics", make_asgi_app())
 
 class LinkCreate(BaseModel):
     code: str
     url: str
-
-@app.get("/metrics")
-def metrics():
-    return Response(
-        content=generate_latest(),
-        media_type=CONTENT_TYPE_LATEST,
-    )
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 REDIS_URL = os.getenv("REDIS_URL")
@@ -88,6 +129,8 @@ def get_link(code: str, response: Response):
     cached = cache.get(code)
 
     if cached:
+        CACHE_HITS.inc()
+
         response.headers["X-Cache"] = "HIT"
 
         if isinstance(cached, bytes):
@@ -97,6 +140,8 @@ def get_link(code: str, response: Response):
             "url": cached,
             "source": "cache",
         }
+
+    CACHE_MISSES.inc()
 
     with psycopg.connect(
         DATABASE_URL,
