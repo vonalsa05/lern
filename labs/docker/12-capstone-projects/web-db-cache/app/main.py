@@ -3,10 +3,15 @@ import os
 import psycopg
 import redis
 from fastapi import FastAPI, HTTPException, Response
+from pydantic import BaseModel
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 app = FastAPI()
 
+
+class LinkCreate(BaseModel):
+    code: str
+    url: str
 
 @app.get("/metrics")
 def metrics():
@@ -57,6 +62,26 @@ def readyz():
         detail=deps,
     )
 
+
+@app.post("/links", status_code=201)
+def create_link(link: LinkCreate):
+    try:
+        with psycopg.connect(DATABASE_URL) as conn:
+            conn.execute(
+                """
+                INSERT INTO links (code, url)
+                VALUES (%s, %s)
+                """,
+                (link.code, link.url),
+            )
+
+        return {"code": link.code}
+
+    except psycopg.errors.UniqueViolation:
+        raise HTTPException(
+            status_code=409,
+            detail="link code already exists",
+        )
 
 @app.get("/hello")
 def hello():
