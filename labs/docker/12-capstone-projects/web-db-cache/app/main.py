@@ -28,14 +28,34 @@ def healthz():
 
 @app.get("/readyz")
 def readyz():
+    deps = {}
+
     try:
-        with psycopg.connect(DATABASE_URL):
-            return {"status": "ready"}
-    except Exception:
-        raise HTTPException(
-            status_code=503,
-            detail={"status": "not ready"},
-        )
+        with psycopg.connect(
+            DATABASE_URL,
+            connect_timeout=2,
+        ) as conn:
+            conn.execute("SELECT 1")
+
+        deps["db"] = "ok"
+
+    except Exception as exc:
+        deps["db"] = f"down: {exc.__class__.__name__}"
+
+    try:
+        cache.ping()
+        deps["cache"] = "ok"
+
+    except Exception as exc:
+        deps["cache"] = f"down: {exc.__class__.__name__}"
+
+    if all(value == "ok" for value in deps.values()):
+        return deps
+
+    raise HTTPException(
+        status_code=503,
+        detail=deps,
+    )
 
 
 @app.get("/hello")
