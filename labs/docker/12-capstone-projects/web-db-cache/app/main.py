@@ -83,6 +83,47 @@ def create_link(link: LinkCreate):
             detail="link code already exists",
         )
 
+@app.get("/links/{code}")
+def get_link(code: str, response: Response):
+    cached = cache.get(code)
+
+    if cached:
+        response.headers["X-Cache"] = "HIT"
+
+        if isinstance(cached, bytes):
+            cached = cached.decode()
+
+        return {
+            "url": cached,
+            "source": "cache",
+        }
+
+    with psycopg.connect(
+        DATABASE_URL,
+        connect_timeout=2,
+    ) as conn:
+        row = conn.execute(
+            "SELECT url FROM links WHERE code = %s",
+            (code,),
+        ).fetchone()
+
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail="link not found",
+        )
+
+    url = row[0]
+
+    cache.set(code, url, ex=60)
+
+    response.headers["X-Cache"] = "MISS"
+
+    return {
+        "url": url,
+        "source": "db",
+    }
+
 @app.get("/hello")
 def hello():
     cached = cache.get("hello")
