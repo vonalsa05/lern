@@ -83,6 +83,18 @@ services:
       - -c
       - psql -h db -U appuser -d appdb -f /migrations/001_init.sql
     restart: "no"
+    
+    deploy:
+      resources:
+        limits:
+          cpus: "0.2"
+          memory: 128M
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   cache:
     image: redis:7-alpine
