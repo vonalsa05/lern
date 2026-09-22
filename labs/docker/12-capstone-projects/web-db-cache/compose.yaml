@@ -3,6 +3,17 @@ services:
     build: .
     image: web-db-cache:1.0.0
     restart: unless-stopped
+
+    read_only: true
+
+    tmpfs:
+      - /tmp
+
+    cap_drop:
+      - ALL
+
+    security_opt:
+      - no-new-privileges:true
     ports:
       - "8080:8080"
 
