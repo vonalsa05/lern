@@ -208,6 +208,7 @@ services:
       #  volume ,   Grafana,
       #   dashboard'     .
       - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
 
     depends_on:
       prometheus:
