@@ -106,6 +106,19 @@ for id in $ids; do
     name="$(docker inspect "$id" --format '{{.Name}}' | sed 's|^/||')"
     status="$(docker inspect "$id" --format '{{.State.Status}}')"
     health="$(docker inspect "$id" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}-{{end}}')"
+
+    if [[ "$name" == "migrate" ]]; then
+        exit_code="$(docker inspect "$id" --format '{{.State.ExitCode}}')"
+
+        if [[ "$status" == "exited" && "$exit_code" == "0" ]]; then
+            ok "$name: completed successfully"
+        else
+            bad "$name: $status (exit $exit_code)" "миграции не завершились успешно"
+        fi
+
+        continue
+    fi
+
     if [[ "$status" == "running" && ( "$health" == "healthy" || "$health" == "-" ) ]]; then
         ok "$name: $status${health:+ ($health)}"
     else
@@ -160,7 +173,10 @@ for id in $ids; do
     name="$(docker inspect "$id" --format '{{.Name}}' | sed 's|^/||')"
     [[ "$(docker inspect "$id" --format '{{.HostConfig.Memory}}')" == "0" ]] && no_mem+=("$name")
     policy="$(docker inspect "$id" --format '{{.HostConfig.RestartPolicy.Name}}')"
-    [[ "$policy" == "no" || -z "$policy" ]] && no_restart+=("$name")
+
+    if [[ "$name" != "migrate" ]]; then
+        [[ "$policy" == "no" || -z "$policy" ]] && no_restart+=("$name")
+    fi
     [[ -z "$(docker inspect "$id" --format '{{index .HostConfig.LogConfig.Config "max-size"}}')" ]] && no_logrotate+=("$name")
     if docker inspect "$id" --format '{{range .Config.Env}}{{println .}}{{end}}' \
         | grep -qiE '(password|secret|token)=.+|://[^:/@]+:[^@]+@'; then

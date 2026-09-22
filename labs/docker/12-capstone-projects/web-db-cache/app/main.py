@@ -5,7 +5,7 @@ import psycopg
 import redis
 from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel
-from prometheus_client import Counter, Histogram, make_asgi_app
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
 app = FastAPI()
 
@@ -55,7 +55,12 @@ async def metrics_middleware(request, call_next):
 
     return response
     
-app.mount("/metrics", make_asgi_app())
+@app.get("/metrics")
+def metrics():
+    return Response(
+        content=generate_latest(),
+        media_type=CONTENT_TYPE_LATEST,
+    )
 
 class LinkCreate(BaseModel):
     code: str
