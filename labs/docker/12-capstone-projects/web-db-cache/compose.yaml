@@ -18,13 +18,15 @@ services:
       - "8080:8080"
 
     environment:
-      DATABASE_URL: postgres://appuser:apppass@db:5432/appdb
-      REDIS_URL: redis://cache:6379
+      DATABASE_URL: postgres://appuser:apppass@toxiproxy:15432/appdb
+      REDIS_URL: redis://toxiproxy:16379
 
     depends_on:
       migrate:
         condition: service_completed_successfully
       cache:
+        condition: service_healthy
+      toxiproxy:
         condition: service_healthy
 
     deploy:
@@ -68,7 +70,7 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-        
+
   k6:
     image: grafana/k6:2.2.0
     profiles:
@@ -96,7 +98,40 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-        
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.8.0
+    restart: unless-stopped
+
+    volumes:
+      - ./toxiproxy/toxiproxy.json:/etc/toxiproxy/toxiproxy.json:ro
+
+    command:
+      - "-config"
+      - "/etc/toxiproxy/toxiproxy.json"
+
+    ports:
+      - "8474:8474"
+
+    healthcheck:
+      test: ["CMD", "/toxiproxy-cli", "list"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 256M
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   migrate:
     image: postgres:16-alpine
     environment:
