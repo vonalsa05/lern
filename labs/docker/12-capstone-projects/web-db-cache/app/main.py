@@ -3,6 +3,7 @@ import time
 
 import psycopg
 import redis
+import string
 from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
@@ -63,7 +64,6 @@ def metrics():
     )
 
 class LinkCreate(BaseModel):
-    code: str
     url: str
 
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -109,25 +109,32 @@ def readyz():
     )
 
 
+import secrets
+
+def _generate_code(length: int = 7) -> str:
+    # короткий url-safe код, без символов - и _
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
 @app.post("/links", status_code=201)
 def create_link(link: LinkCreate):
-    try:
-        with psycopg.connect(DATABASE_URL) as conn:
-            conn.execute(
-                """
-                INSERT INTO links (code, url)
-                VALUES (%s, %s)
-                """,
-                (link.code, link.url),
-            )
+    for _ in range(5):
+        code = _generate_code()
+        try:
+            with psycopg.connect(DATABASE_URL) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO links (code, url)
+                    VALUES (%s, %s)
+                    """,
+                    (code, link.url),
+                )
+            return {"code": code}
+        except psycopg.errors.UniqueViolation:
+            continue  # крайне маловероятно, но пробуем ещё раз
 
-        return {"code": link.code}
-
-    except psycopg.errors.UniqueViolation:
-        raise HTTPException(
-            status_code=409,
-            detail="link code already exists",
-        )
+    raise HTTPException(status_code=500, detail="could not generate unique code")
 
 @app.get("/links/{code}")
 def get_link(code: str, response: Response):

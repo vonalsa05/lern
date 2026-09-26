@@ -69,6 +69,34 @@ services:
         max-size: "10m"
         max-file: "3"
         
+  k6:
+    image: grafana/k6:2.2.0
+    profiles:
+      - load
+
+    volumes:
+      - ./load:/scripts:ro
+      - ./load/results:/results
+
+    environment:
+      API_URL: http://api:8080
+
+    depends_on:
+      api:
+        condition: service_healthy
+
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+        
   migrate:
     image: postgres:16-alpine
     environment:
@@ -108,7 +136,6 @@ services:
         "--maxmemory-policy",
         "allkeys-lru"
       ]
-
 
     volumes:
       - redis_data:/data

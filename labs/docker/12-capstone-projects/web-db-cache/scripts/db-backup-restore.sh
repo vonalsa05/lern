@@ -42,7 +42,7 @@ wait_for_db() {
         sleep 1
     done
 
-    echo "PostgreSQL не стал готовым за 60 секунд" >&2
+    echo "PostgreSQL РЅРµ СЃС‚Р°Р» РіРѕС‚РѕРІС‹Рј Р·Р° 60 СЃРµРєСѓРЅРґ" >&2
     return 1
 }
 
@@ -52,7 +52,7 @@ backup() {
     local backup_file
     backup_file="$BACKUP_DIR/${PG_DB}-$(date '+%Y-%m-%d_%H%M%S').dump"
 
-    echo "Создаю backup: $backup_file"
+    echo "РЎРѕР·РґР°СЋ backup: $backup_file"
 
     compose exec -T "$DB_SERVICE" \
         pg_dump \
@@ -63,7 +63,7 @@ backup() {
 
     test -s "$backup_file"
 
-    echo "Backup успешно создан:"
+    echo "Backup СѓСЃРїРµС€РЅРѕ СЃРѕР·РґР°РЅ:"
     echo "  $backup_file"
 }
 
@@ -71,22 +71,22 @@ restore() {
     local backup_file="${1:-}"
 
     if [[ -z "$backup_file" ]]; then
-        echo "Укажи backup-файл" >&2
+        echo "РЈРєР°Р¶Рё backup-С„Р°Р№Р»" >&2
         usage
         exit 2
     fi
 
     if [[ ! -f "$backup_file" ]]; then
-        echo "Backup не найден: $backup_file" >&2
+        echo "Backup РЅРµ РЅР°Р№РґРµРЅ: $backup_file" >&2
         exit 1
     fi
 
-    echo "Запускаю PostgreSQL..."
+    echo "Р—Р°РїСѓСЃРєР°СЋ PostgreSQL..."
     compose up -d "$DB_SERVICE"
 
     wait_for_db
 
-    echo "Восстанавливаю: $backup_file"
+    echo "Р’РѕСЃСЃС‚Р°РЅР°РІР»РёРІР°СЋ: $backup_file"
 
     compose exec -T "$DB_SERVICE" \
         pg_restore \
@@ -98,7 +98,7 @@ restore() {
         -d "$PG_DB" \
         < "$backup_file"
 
-    echo "Restore завершён успешно."
+    echo "Restore Р·Р°РІРµСЂС€С‘РЅ СѓСЃРїРµС€РЅРѕ."
 }
 
 cycle() {
@@ -110,11 +110,11 @@ cycle() {
 
     probe_code="backup-restore-$(date '+%s')"
 
-    echo "1. Проверяю, что PostgreSQL работает..."
+    echo "1. РџСЂРѕРІРµСЂСЏСЋ, С‡С‚Рѕ PostgreSQL СЂР°Р±РѕС‚Р°РµС‚..."
     compose up -d "$DB_SERVICE"
     wait_for_db
 
-    echo "2. Записываю тестовую строку..."
+    echo "2. Р—Р°РїРёСЃС‹РІР°СЋ С‚РµСЃС‚РѕРІСѓСЋ СЃС‚СЂРѕРєСѓ..."
 
     compose exec -T "$DB_SERVICE" \
         psql \
@@ -126,7 +126,7 @@ cycle() {
             ON CONFLICT (code) DO UPDATE
             SET url = EXCLUDED.url"
 
-    echo "3. Создаю backup..."
+    echo "3. РЎРѕР·РґР°СЋ backup..."
 
     backup_file="$BACKUP_DIR/${PG_DB}-cycle-$(date '+%Y-%m-%d_%H%M%S').dump"
 
@@ -139,16 +139,16 @@ cycle() {
 
     test -s "$backup_file"
 
-    echo "4. Уничтожаю контейнеры и volumes..."
+    echo "4. РЈРЅРёС‡С‚РѕР¶Р°СЋ РєРѕРЅС‚РµР№РЅРµСЂС‹ Рё volumes..."
 
     compose down -v
 
-    echo "5. Поднимаю чистую PostgreSQL..."
+    echo "5. РџРѕРґРЅРёРјР°СЋ С‡РёСЃС‚СѓСЋ PostgreSQL..."
 
     compose up -d "$DB_SERVICE"
     wait_for_db
 
-    echo "6. Восстанавливаю backup..."
+    echo "6. Р’РѕСЃСЃС‚Р°РЅР°РІР»РёРІР°СЋ backup..."
 
     compose exec -T "$DB_SERVICE" \
         pg_restore \
@@ -160,7 +160,7 @@ cycle() {
         -d "$PG_DB" \
         < "$backup_file"
 
-    echo "7. Проверяю восстановленные данные..."
+    echo "7. РџСЂРѕРІРµСЂСЏСЋ РІРѕСЃСЃС‚Р°РЅРѕРІР»РµРЅРЅС‹Рµ РґР°РЅРЅС‹Рµ..."
 
     restored_count="$(
         compose exec -T "$DB_SERVICE" \
@@ -176,12 +176,12 @@ cycle() {
     restored_count="${restored_count//[[:space:]]/}"
 
     if [[ "$restored_count" != "1" ]]; then
-        echo "ОШИБКА: тестовая строка после restore не найдена" >&2
+        echo "РћРЁРР‘РљРђ: С‚РµСЃС‚РѕРІР°СЏ СЃС‚СЂРѕРєР° РїРѕСЃР»Рµ restore РЅРµ РЅР°Р№РґРµРЅР°" >&2
         exit 1
     fi
 
-    echo "8. Тест пройден."
-    echo "Данные пережили: dump -> down -v -> restore"
+    echo "8. РўРµСЃС‚ РїСЂРѕР№РґРµРЅ."
+    echo "Р”Р°РЅРЅС‹Рµ РїРµСЂРµР¶РёР»Рё: dump -> down -v -> restore"
     echo "Backup: $backup_file"
 }
 
