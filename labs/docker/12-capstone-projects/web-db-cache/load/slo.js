@@ -21,6 +21,7 @@ const missLatency = new Trend('read_latency_miss', true);
 
 export const options = {
   summaryTrendStats: ['avg', 'min', 'med', 'p(90)', 'p(95)', 'p(99)', 'max'],
+  setupTimeout: '5m',
   scenarios: {
     warmup: {
       executor: 'ramping-arrival-rate',
