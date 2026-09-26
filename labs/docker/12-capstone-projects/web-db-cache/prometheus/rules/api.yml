@@ -1,0 +1,23 @@
+groups:
+  - name: api-slo
+    rules:
+      - alert: APIReadP95High
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (
+              rate(
+                http_request_duration_seconds_bucket{
+                  job="api",
+                  method="GET",
+                  route="/links/{code}"
+                }[5m]
+              )
+            )
+          ) > 0.3
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "API read p95 is above 300ms"
+          description: "The p95 latency of GET /links/{code} has been above 300ms for more than 2 minutes."
